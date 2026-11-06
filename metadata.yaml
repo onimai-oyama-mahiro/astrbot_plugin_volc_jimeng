@@ -1,0 +1,8 @@
+name: astrbot_plugin_volc_jimeng
+display_name: 即梦生图
+desc: 接入火山视觉智能开放平台「即梦AI-图片生成4.6」，让 AI 自主决定是否画图，并自带 WebUI 控制台（概览 / 生成 / 历史 / 预设 / 设置）。
+short_desc: 即梦 4.6 生图 + AI 自主调用 + 可视化控制台
+version: 1.1.1
+author: shira
+repo: https://github.com/your-name/astrbot_plugin_volc_jimeng
+

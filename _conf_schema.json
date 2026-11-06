@@ -1,0 +1,173 @@
+{
+  "access_key_id": {
+    "description": "AccessKey ID",
+    "type": "string",
+    "default": "",
+    "hint": "火山引擎访问控制 → 用户 → 密钥管理中的 AccessKey ID。这里需要的是签名用的 AccessKey，不是方舟的 API Key。"
+  },
+  "secret_access_key": {
+    "description": "SecretAccessKey",
+    "type": "string",
+    "default": "",
+    "secret": true,
+    "hint": "与 AccessKey ID 配对的 SecretAccessKey，只显示一次，请妥善保存。"
+  },
+  "req_key": {
+    "description": "生图模型",
+    "type": "string",
+    "options": ["jimeng_seedream46_cvtob"],
+    "labels": ["即梦AI-图片生成4.6"],
+    "default": "jimeng_seedream46_cvtob",
+    "hint": "目前仅内置「即梦AI-图片生成4.6」。显示的是中文名称，实际请求使用内部 req_key。"
+  },
+  "size_preset": {
+    "description": "默认画面尺寸",
+    "type": "string",
+    "options": [
+      "1024x1024",
+      "2048x2048",
+      "2304x1728",
+      "2496x1664",
+      "2560x1440",
+      "3024x1296",
+      "4096x4096",
+      "5404x3040"
+    ],
+    "labels": [
+      "1K · 1:1（1024×1024）",
+      "2K · 1:1（2048×2048）",
+      "2K · 4:3（2304×1728）",
+      "2K · 3:2（2496×1664）",
+      "2K · 16:9（2560×1440）",
+      "2K · 21:9（3024×1296）",
+      "4K · 1:1（4096×4096）",
+      "4K · 16:9（5404×3040）"
+    ],
+    "default": "2048x2048",
+    "hint": "2K 1:1 是官方默认档；尺寸越大越慢、越贵。"
+  },
+  "scale": {
+    "description": "文本影响程度（scale）",
+    "type": "int",
+    "default": 50,
+    "slider": {"min": 1, "max": 100, "step": 1},
+    "hint": "越大越贴近提示词，越小越贴近参考图。纯文生图保持 50 即可。"
+  },
+  "force_single": {
+    "description": "强制只生成 1 张",
+    "type": "bool",
+    "default": true,
+    "hint": "v4.6 默认可能一次出多张（按张计费）。开启后每次只出 1 张，省钱且稳定。"
+  },
+  "enable_img2img": {
+    "description": "启用图生图（参考图）",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后，消息里带的图片、引用的图片、或控制台上传的参考图会随提示词一起提交。"
+  },
+  "max_input_images": {
+    "description": "单次最多参考图数量",
+    "type": "int",
+    "default": 4,
+    "slider": {"min": 1, "max": 14, "step": 1},
+    "hint": "v4.6 最多支持 14 张输入图，参考图越多处理越慢、效果也可能下降。"
+  },
+  "watermark": {
+    "description": "添加 AI 水印",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后图片右下角带「AI生成」水印。"
+  },
+  "timeout": {
+    "description": "单次生成超时（秒）",
+    "type": "int",
+    "default": 180,
+    "slider": {"min": 30, "max": 600, "step": 10},
+    "hint": "异步轮询的总超时。2K 单图通常 20～60 秒。"
+  },
+  "poll_interval": {
+    "description": "轮询间隔（秒）",
+    "type": "float",
+    "default": 2.0,
+    "slider": {"min": 0.5, "max": 10.0, "step": 0.5},
+    "hint": "查询任务结果的间隔，太小会增加请求数。"
+  },
+  "max_concurrency": {
+    "description": "最大并发生成数",
+    "type": "int",
+    "default": 2,
+    "slider": {"min": 1, "max": 8, "step": 1},
+    "hint": "同时进行的生成任务上限，低配服务器建议 2。"
+  },
+  "enable_llm_tool": {
+    "description": "启用 AI 自主画图工具",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后模型可以在对话中自行判断并调用 jimeng_draw_image 工具。"
+  },
+  "tool_wait": {
+    "description": "工具内等待生成完成",
+    "type": "bool",
+    "default": false,
+    "hint": "关闭时：工具立即返回，图片画好后单独发送（推荐，避免工具超时）。开启时：在工具调用里等待并直接发图。"
+  },
+  "inject_hint": {
+    "description": "注入画图引导提示",
+    "type": "bool",
+    "default": true,
+    "hint": "在系统提示末尾追加一段很短的说明，帮助模型判断何时该画图。会轻微增加 token。"
+  },
+  "enable_command": {
+    "description": "启用 /画图 指令",
+    "type": "bool",
+    "default": true,
+    "hint": "关闭后只能由 AI 自主调用，用户不能手动触发。"
+  },
+  "daily_limit": {
+    "description": "每日总生成上限",
+    "type": "int",
+    "default": 50,
+    "slider": {"min": 0, "max": 1000, "step": 1},
+    "hint": "0 表示不限制。"
+  },
+  "user_daily_limit": {
+    "description": "单用户每日上限",
+    "type": "int",
+    "default": 10,
+    "slider": {"min": 0, "max": 200, "step": 1},
+    "hint": "0 表示不限制。"
+  },
+  "cooldown": {
+    "description": "单用户冷却时间（秒）",
+    "type": "int",
+    "default": 10,
+    "slider": {"min": 0, "max": 600, "step": 1},
+    "hint": "两次生成之间的最小间隔，0 表示不限制。"
+  },
+  "whitelist": {
+    "description": "用户白名单",
+    "type": "list",
+    "default": [],
+    "hint": "填写后仅这些用户 ID 可以使用；留空表示不限制。"
+  },
+  "admin_bypass": {
+    "description": "管理员绕过限额",
+    "type": "bool",
+    "default": true,
+    "hint": "管理员不受每日上限、冷却和白名单限制。"
+  },
+  "keep_days": {
+    "description": "本地图片保留天数",
+    "type": "int",
+    "default": 7,
+    "slider": {"min": 0, "max": 90, "step": 1},
+    "hint": "启动时清理超过天数的图片和记录，0 表示不自动清理。"
+  },
+  "max_history": {
+    "description": "历史记录上限",
+    "type": "int",
+    "default": 200,
+    "slider": {"min": 20, "max": 2000, "step": 10},
+    "hint": "超出后自动删除最旧的记录和图片。"
+  }
+}

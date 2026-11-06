@@ -1,0 +1,8 @@
+{
+  "views": {
+    "dashboard": {
+      "title": "Jimeng Image Console",
+      "description": "Overview, generation, history, presets and settings for Jimeng 4.6."
+    }
+  }
+}

@@ -337,6 +337,41 @@ a {
   font-size: 12px;
 }
 
+.steps {
+  margin: 8px 0 0;
+  padding-left: 22px;
+  display: grid;
+  gap: 14px;
+}
+
+.steps li {
+  padding-left: 4px;
+}
+
+.steps b {
+  font-size: 14px;
+}
+
+.steps p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.steps .warn {
+  color: var(--danger);
+}
+
+code {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 0 5px;
+  font-size: 12px;
+  word-break: break-all;
+}
+
 .tip {
   color: var(--muted);
   font-size: 12px;
@@ -347,6 +382,15 @@ a {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
+}
+
+.gallery-page {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.gallery-page .item {
+  aspect-ratio: 1 / 1;
 }
 
 .gallery .item {
@@ -664,6 +708,11 @@ a {
   justify-content: flex-end;
   gap: 8px;
   margin-top: 12px;
+  align-items: center;
+}
+
+.pager .muted {
+  margin-right: auto;
 }
 
 .preset-list {
@@ -831,6 +880,12 @@ a {
   display: none !important;
 }
 
+@media (max-width: 1200px) {
+  .gallery-page {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
 @media (max-width: 900px) {
   .stats {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -843,6 +898,16 @@ a {
   }
 
   .gallery {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .gallery-page {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 600px) {
+  .gallery-page {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }

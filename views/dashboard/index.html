@@ -31,8 +31,10 @@
         <button class="tab active" data-tab="overview" type="button">概览</button>
         <button class="tab" data-tab="generate" type="button">生成</button>
         <button class="tab" data-tab="history" type="button">历史</button>
+        <button class="tab" data-tab="gallery" type="button">图库</button>
         <button class="tab" data-tab="presets" type="button">预设</button>
         <button class="tab" data-tab="settings" type="button">设置</button>
+        <button class="tab" data-tab="r2" type="button">R2 指南</button>
       </nav>
 
       <!-- 概览 -->
@@ -171,6 +173,22 @@
         </div>
       </section>
 
+      <!-- 图库 -->
+      <section class="panel" id="tab-gallery">
+        <div class="card">
+          <div class="card-head">
+            <h2>图库</h2>
+            <span id="gallery-count" class="muted">—</span>
+          </div>
+          <div id="gallery-grid" class="gallery gallery-page"></div>
+          <div class="pager">
+            <span id="gallery-page-info" class="muted"></span>
+            <button id="gallery-prev" class="btn btn-ghost btn-sm" type="button">上一页</button>
+            <button id="gallery-next" class="btn btn-ghost btn-sm" type="button">下一页</button>
+          </div>
+        </div>
+      </section>
+
       <!-- 预设 -->
       <section class="panel" id="tab-presets">
         <div class="grid-2">
@@ -284,9 +302,102 @@
           </label>
         </div>
 
+        <div class="card">
+          <div class="card-head">
+            <h2>Cloudflare R2</h2>
+            <span class="muted">参考图公网托管（方案 A：自定义域直连）</span>
+          </div>
+          <div class="field switches">
+            <label class="switch"><input id="cfg-r2" type="checkbox" /><span>启用 R2 上传</span></label>
+            <label class="switch"><input id="cfg-r2-delete" type="checkbox" /><span>生成完成后删除对象</span></label>
+          </div>
+          <div class="grid-2 settings-grid">
+            <label class="field"><span>Account ID</span><input id="cfg-r2-account" class="input" placeholder="Cloudflare Account ID" /></label>
+            <label class="field"><span>Bucket</span><input id="cfg-r2-bucket" class="input" placeholder="astrbot-jimeng" /></label>
+            <label class="field"><span>公共访问地址</span><input id="cfg-r2-base" class="input" placeholder="https://img.example.com" /></label>
+            <label class="field"><span>对象前缀</span><input id="cfg-r2-prefix" class="input" placeholder="jimeng/" /></label>
+            <label class="field"><span>R2 AccessKey ID</span><input id="cfg-r2-ak" class="input" autocomplete="off" /></label>
+            <label class="field"><span>R2 SecretAccessKey</span><input id="cfg-r2-sk" class="input" type="password" autocomplete="new-password" placeholder="留空表示不修改" /></label>
+          </div>
+          <p class="tip">
+            只给目标 bucket 的 Object Read &amp; Write 权限；公共地址必须是自定义域，不要用
+            <code>r2.dev</code>（有限速，仅测试）。没配好之前请不要把「启用 R2」打开。
+          </p>
+          <div class="row">
+            <button id="btn-r2-test" class="btn btn-ghost btn-sm" type="button">测试 R2 上传</button>
+            <button id="btn-r2-clear" class="btn btn-danger btn-sm" type="button">清除 R2 凭证</button>
+            <span id="r2-test-result" class="muted"></span>
+          </div>
+        </div>
+
         <div class="save-bar">
           <button id="btn-save" class="btn btn-primary" type="button">保存设置</button>
           <span id="save-state" class="muted"></span>
+        </div>
+      </section>
+
+      <!-- R2 指南 -->
+      <section class="panel" id="tab-r2">
+        <div class="card">
+          <div class="card-head">
+            <h2>Cloudflare R2 配置步骤（方案 A）</h2>
+            <button class="btn btn-primary btn-sm" data-goto="settings" type="button">去填写设置</button>
+          </div>
+          <p class="muted">
+            目标：本地参考图 → R2 → 自定义域公共 URL → 即梦下载。全程不需要给 ECS 开公网文件服务。
+          </p>
+          <ol class="steps">
+            <li>
+              <b>创建 Bucket</b>
+              <p>Cloudflare Dashboard → R2 Object Storage → Create bucket，名称如 <code>astrbot-jimeng</code>，Location 选 Automatic。</p>
+            </li>
+            <li>
+              <b>绑定自定义域（关键）</b>
+              <p>进入该 Bucket → Settings → Custom Domains → Connect Domain，填一个已托管在 Cloudflare 的域名，例如 <code>img.example.com</code>，等状态变成 Active。</p>
+              <p class="warn">不要用 <code>pub-xxx.r2.dev</code>：它是测试域，有几百请求/秒的限速，国内也不稳定。</p>
+            </li>
+            <li>
+              <b>创建 R2 API Token</b>
+              <p>R2 → Manage R2 API Tokens → Create API Token，权限选 <b>Object Read &amp; Write</b>，Scope 只选这个 Bucket。创建后保存 <b>Access Key ID</b> 和 <b>Secret Access Key</b>（Secret 只显示一次）。</p>
+            </li>
+            <li>
+              <b>回到「设置」填写</b>
+              <p>Account ID 取自端点 <code>https://&lt;ACCOUNT_ID&gt;.r2.cloudflarestorage.com</code>；Bucket 填桶名；公共访问地址填自定义域（带 <code>https://</code>，结尾不要 <code>/</code>）；再填 R2 的 AccessKey / Secret 和前缀。</p>
+            </li>
+            <li>
+              <b>建议加生命周期兜底</b>
+              <p>Bucket → Settings → Lifecycle rules，前缀填 <code>jimeng/</code>，设置 1 天后删除。插件默认生成完就删，生命周期是防止异常情况下残留。</p>
+            </li>
+            <li>
+              <b>测试</b>
+              <p>在「设置 → Cloudflare R2」点 <b>测试 R2 上传</b>：会传一张 16×16 的测试图、通过公共地址读一次、再删除。成功会显示 URL 和耗时。</p>
+            </li>
+          </ol>
+        </div>
+
+        <div class="grid-2">
+          <div class="card">
+            <div class="card-head"><h2>需要填写的值</h2><span class="muted">对应设置页</span></div>
+            <dl class="kv">
+              <div><dt>Account ID</dt><dd>S3 端点里的那串 ID</dd></div>
+              <div><dt>Bucket</dt><dd>例如 astrbot-jimeng</dd></div>
+              <div><dt>公共访问地址</dt><dd>https://img.example.com</dd></div>
+              <div><dt>R2 AccessKey ID</dt><dd>API Token 的 Access Key ID</dd></div>
+              <div><dt>R2 Secret</dt><dd>API Token 的 Secret Access Key</dd></div>
+              <div><dt>对象前缀</dt><dd>jimeng/（建议）</dd></div>
+            </dl>
+          </div>
+
+          <div class="card">
+            <div class="card-head"><h2>常见问题</h2><span class="muted">先看这里</span></div>
+            <ul class="quick">
+              <li><b>为什么不用 r2.dev？</b>限速、仅测试、国内不稳；自定义域才是生产路径。</li>
+              <li><b>图片会公开吗？</b>是。知道 URL 的人能访问；插件用 UUID 命名，并默认生成后删除。</li>
+              <li><b>即梦报 50220？</b>说明它拿到的不是公网 http(s) 图片：检查自定义域是否 Active、WAF/Bot Fight 是否拦截。</li>
+              <li><b>需要配置 CORS 吗？</b>不需要，上传和下载都是服务端行为。</li>
+              <li><b>R2 填错会怎样？</b>插件会回退 AstrBot 文件服务；两者都不可用时会明确报错。</li>
+            </ul>
+          </div>
         </div>
       </section>
     </div>

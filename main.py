@@ -29,7 +29,7 @@ from PIL import Image as PILImage
 from PIL import ImageOps
 
 PLUGIN_NAME = "astrbot_plugin_volc_jimeng"
-PLUGIN_VERSION = "1.1.1"
+PLUGIN_VERSION = "1.3.0"
 
 # req_key -> 中文展示名（目前只开放 4.6）
 REQ_KEYS: dict[str, str] = {
@@ -57,6 +57,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "force_single": True,
     "enable_img2img": True,
     "max_input_images": 4,
+    "r2_enabled": False,
+    "r2_account_id": "",
+    "r2_bucket": "",
+    "r2_public_base": "",
+    "r2_access_key_id": "",
+    "r2_secret_access_key": "",
+    "r2_prefix": "jimeng/",
+    "r2_delete_after": True,
     "watermark": False,
     "timeout": 180,
     "poll_interval": 2.0,
@@ -168,6 +176,84 @@ class JimengClient:
         return self._service().cv_sync2async_get_result(payload)
 
 
+class R2Uploader:
+    """把参考图上传到 Cloudflare R2，并返回自定义域公共链接。"""
+
+    def __init__(
+        self,
+        account_id: str,
+        access_key_id: str,
+        secret_access_key: str,
+        bucket: str,
+        public_base: str,
+    ) -> None:
+        self.account_id = (account_id or "").strip()
+        self.access_key_id = (access_key_id or "").strip()
+        self.secret_access_key = (secret_access_key or "").strip()
+        self.bucket = (bucket or "").strip()
+        self.public_base = (public_base or "").strip().rstrip("/")
+        self._s3 = None
+
+    def validate(self) -> None:
+        missing = [
+            label
+            for label, value in (
+                ("Account ID", self.account_id),
+                ("AccessKey ID", self.access_key_id),
+                ("SecretAccessKey", self.secret_access_key),
+                ("Bucket", self.bucket),
+                ("公共访问地址", self.public_base),
+            )
+            if not value
+        ]
+        if missing:
+            raise JimengError("R2 配置不完整：" + "、".join(missing))
+        if not self.public_base.startswith(("http://", "https://")):
+            raise JimengError("R2 公共访问地址必须以 http:// 或 https:// 开头")
+
+    def _client(self):
+        if self._s3 is not None:
+            return self._s3
+        try:
+            import boto3
+            from botocore.config import Config
+        except Exception as exc:  # noqa: BLE001
+            raise JimengError(
+                "缺少依赖 boto3，请在插件管理页安装依赖或手动 pip install boto3"
+            ) from exc
+        self.validate()
+        self._s3 = boto3.client(
+            "s3",
+            endpoint_url=f"https://{self.account_id}.r2.cloudflarestorage.com",
+            aws_access_key_id=self.access_key_id,
+            aws_secret_access_key=self.secret_access_key,
+            region_name="auto",
+            config=Config(
+                signature_version="s3v4",
+                retries={"max_attempts": 3, "mode": "standard"},
+            ),
+        )
+        return self._s3
+
+    def public_url(self, key: str) -> str:
+        from urllib.parse import quote
+
+        return f"{self.public_base}/{quote(key, safe='/')}"
+
+    def put(self, key: str, data: bytes, content_type: str = "image/jpeg") -> str:
+        self._client().put_object(
+            Bucket=self.bucket,
+            Key=key,
+            Body=data,
+            ContentType=content_type,
+            CacheControl="public, max-age=3600",
+        )
+        return self.public_url(key)
+
+    def delete(self, key: str) -> None:
+        self._client().delete_object(Bucket=self.bucket, Key=key)
+
+
 @register(PLUGIN_NAME, "shira", "即梦AI-图片生成4.6 生图与可视化控制台", PLUGIN_VERSION)
 class VolcJimengPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
@@ -219,8 +305,10 @@ class VolcJimengPlugin(Star):
             ("config/save", self.api_config_save, ["POST"], "保存配置"),
             ("generate", self.api_generate, ["POST"], "创建生成任务"),
             ("upload", self.api_upload, ["POST"], "上传参考图"),
+            ("r2/test", self.api_r2_test, ["POST"], "测试 R2 上传"),
             ("task", self.api_task, ["GET"], "查询任务"),
             ("history", self.api_history, ["GET"], "生成历史"),
+            ("gallery", self.api_gallery, ["GET"], "图库"),
             ("history/delete", self.api_history_delete, ["POST"], "删除历史"),
             ("image", self.api_image, ["GET"], "读取图片"),
             ("presets", self.api_presets, ["GET"], "预设列表"),
@@ -542,13 +630,51 @@ class VolcJimengPlugin(Star):
             "callback_api_base，或改为发送图片链接（即梦 4.6 不接受 base64/data URI）。"
         )
 
-    async def _prepare_input_images(self, refs: list[str]) -> list[str]:
+    def _r2_uploader(self) -> R2Uploader:
+        return R2Uploader(
+            str(self._cfg("r2_account_id") or ""),
+            str(self._cfg("r2_access_key_id") or ""),
+            str(self._cfg("r2_secret_access_key") or ""),
+            str(self._cfg("r2_bucket") or ""),
+            str(self._cfg("r2_public_base") or ""),
+        )
+
+    async def _upload_for_jimeng(self, path: Path) -> tuple[str, str | None]:
+        """返回 (公网URL, 需要清理的 R2 key)。"""
+        if not bool(self._cfg("r2_enabled")):
+            return await self._to_public_image_ref(path), None
+
+        prefix = str(self._cfg("r2_prefix") or "jimeng/").strip().strip("/")
+        date_part = datetime.now().strftime("%Y%m%d")
+        key = f"{prefix}/{date_part}/{uuid.uuid4().hex}.jpg" if prefix else f"{date_part}/{uuid.uuid4().hex}.jpg"
+        data = await asyncio.to_thread(path.read_bytes)
+        uploader = self._r2_uploader()
+        url = await asyncio.to_thread(uploader.put, key, data)
+        return url, key
+
+    async def _cleanup_r2(self, keys: list[str]) -> None:
+        if not keys or not bool(self._cfg("r2_delete_after")):
+            return
+        try:
+            uploader = self._r2_uploader()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[jimeng] R2 清理初始化失败: %s", exc)
+            return
+        for key in keys:
+            try:
+                await asyncio.to_thread(uploader.delete, key)
+                logger.debug("[jimeng] 已删除 R2 对象 %s", key)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[jimeng] 删除 R2 对象失败 %s: %s", key, exc)
+
+    async def _prepare_input_images(self, refs: list[str]) -> tuple[list[str], list[str]]:
         if not refs:
-            return []
+            return [], []
         if not bool(self._cfg("enable_img2img")):
             raise JimengError("图生图已在设置中关闭。")
         limit = max(1, min(14, self._cfg_int("max_input_images", 4)))
         prepared: list[str] = []
+        uploaded_keys: list[str] = []
         for ref in refs[:limit]:
             ref = (ref or "").strip()
             if not ref:
@@ -564,7 +690,17 @@ class VolcJimengPlugin(Star):
                 else:
                     source = Path(ref)
                 normalized = await asyncio.to_thread(self._normalize_local_image, source)
-                prepared.append(await self._to_public_image_ref(normalized))
+                if bool(self._cfg("r2_enabled")):
+                    try:
+                        url, key = await self._upload_for_jimeng(normalized)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("[jimeng] R2 上传失败，回退 AstrBot 文件服务: %s", exc)
+                        url, key = await self._to_public_image_ref(normalized), None
+                else:
+                    url, key = await self._to_public_image_ref(normalized), None
+                prepared.append(url)
+                if key:
+                    uploaded_keys.append(key)
             except JimengError:
                 raise
             except Exception as exc:  # noqa: BLE001
@@ -573,7 +709,7 @@ class VolcJimengPlugin(Star):
             raise JimengError(
                 "参考图读取失败。请确认图片存在，且能通过公网 URL 访问（即梦 4.6 不接受 base64）。"
             )
-        return prepared
+        return prepared, uploaded_keys
 
     async def _submit(
         self,
@@ -719,8 +855,11 @@ class VolcJimengPlugin(Star):
             "inputs": 0,
         }
 
+        uploaded_keys: list[str] = []
         try:
-            prepared_images = await self._prepare_input_images(list(input_images or []))
+            prepared_images, uploaded_keys = await self._prepare_input_images(
+                list(input_images or [])
+            )
             record["inputs"] = len(prepared_images)
             async with self._sem:
                 task_id = await self._submit(prompt, width, height, prepared_images)
@@ -750,6 +889,9 @@ class VolcJimengPlugin(Star):
             )
             await self._append_history(record)
             raise JimengError(message) from exc
+        finally:
+            # 即梦任务结束后（成功或失败）再删 R2 对象，避免下载中途 404
+            await self._cleanup_r2(uploaded_keys)
 
         await self._append_history(record)
         self._consume_quota(user_id, is_admin)
@@ -930,6 +1072,14 @@ class VolcJimengPlugin(Star):
             "force_single": bool(self._cfg("force_single")),
             "enable_img2img": bool(self._cfg("enable_img2img")),
             "max_input_images": self._cfg_int("max_input_images", 4),
+            "r2_enabled": bool(self._cfg("r2_enabled")),
+            "r2_account_id": str(self._cfg("r2_account_id") or ""),
+            "r2_bucket": str(self._cfg("r2_bucket") or ""),
+            "r2_public_base": str(self._cfg("r2_public_base") or ""),
+            "r2_access_key_id": str(self._cfg("r2_access_key_id") or ""),
+            "r2_secret_access_key": "******" if str(self._cfg("r2_secret_access_key") or "").strip() else "",
+            "r2_prefix": str(self._cfg("r2_prefix") or "jimeng/"),
+            "r2_delete_after": bool(self._cfg("r2_delete_after")),
             "watermark": bool(self._cfg("watermark")),
             "timeout": self._cfg_int("timeout", 180),
             "poll_interval": self._cfg_float("poll_interval", 2.0),
@@ -1005,6 +1155,29 @@ class VolcJimengPlugin(Star):
                 if sk and sk != "******":
                     patch["secret_access_key"] = sk
 
+        if payload.get("clear_r2_credentials"):
+            patch["r2_access_key_id"] = ""
+            patch["r2_secret_access_key"] = ""
+            patch["r2_enabled"] = False
+        else:
+            for key in (
+                "r2_account_id",
+                "r2_bucket",
+                "r2_public_base",
+                "r2_prefix",
+                "r2_access_key_id",
+            ):
+                if key in payload:
+                    patch[key] = str(payload.get(key) or "").strip()
+            if patch.get("r2_public_base"):
+                if not patch["r2_public_base"].startswith(("http://", "https://")):
+                    return error_response("R2 公共访问地址必须以 http:// 或 https:// 开头")
+                patch["r2_public_base"] = patch["r2_public_base"].rstrip("/")
+            if "r2_secret_access_key" in payload:
+                sk = str(payload.get("r2_secret_access_key") or "").strip()
+                if sk and sk != "******":
+                    patch["r2_secret_access_key"] = sk
+
         if "req_key" in payload:
             req_key = str(payload.get("req_key") or "").strip()
             if req_key not in REQ_KEYS:
@@ -1046,6 +1219,8 @@ class VolcJimengPlugin(Star):
         for key in (
             "force_single",
             "enable_img2img",
+            "r2_enabled",
+            "r2_delete_after",
             "watermark",
             "enable_llm_tool",
             "tool_wait",
@@ -1133,15 +1308,22 @@ class VolcJimengPlugin(Star):
                 target.unlink(missing_ok=True)
                 return error_response("图片不能超过 15MB")
             await asyncio.to_thread(self._validate_image_file, target)
-            # 4.6 只认公网 URL：上传时就确认文件服务可用，避免生成时才报错
-            try:
-                await Comp.Image.fromFileSystem(str(target)).register_to_file_service()
-            except Exception as exc:  # noqa: BLE001
-                target.unlink(missing_ok=True)
-                return error_response(
-                    "本地上传的参考图需要公网访问：请先在 AstrBot「系统设置 → 网络」配置 "
-                    "callback_api_base，或直接使用图片 URL。"
-                )
+            # 4.6 只认公网 URL：上传时确认至少有一条可用通路
+            if bool(self._cfg("r2_enabled")):
+                try:
+                    self._r2_uploader().validate()
+                except JimengError as exc:
+                    target.unlink(missing_ok=True)
+                    return error_response(str(exc))
+            else:
+                try:
+                    await Comp.Image.fromFileSystem(str(target)).register_to_file_service()
+                except Exception:  # noqa: BLE001
+                    target.unlink(missing_ok=True)
+                    return error_response(
+                        "本地上传的参考图需要公网访问：请先在「设置 → Cloudflare R2」启用 R2，"
+                        "或在 AstrBot「系统设置 → 网络」配置 callback_api_base。"
+                    )
             preview = await asyncio.to_thread(self._image_preview, target)
         except Exception as exc:  # noqa: BLE001
             target.unlink(missing_ok=True)
@@ -1149,6 +1331,63 @@ class VolcJimengPlugin(Star):
         return json_response(
             {"id": image_id, "name": getattr(upload, "filename", "") or target.name, "preview": preview}
         )
+
+    async def api_r2_test(self):
+        payload = await request.json(default={}) or {}
+        secret = str(payload.get("r2_secret_access_key") or "").strip()
+        if not secret or secret == "******":
+            secret = str(self._cfg("r2_secret_access_key") or "").strip()
+        uploader = R2Uploader(
+            str(payload.get("r2_account_id") or self._cfg("r2_account_id") or ""),
+            str(payload.get("r2_access_key_id") or self._cfg("r2_access_key_id") or ""),
+            secret,
+            str(payload.get("r2_bucket") or self._cfg("r2_bucket") or ""),
+            str(payload.get("r2_public_base") or self._cfg("r2_public_base") or ""),
+        )
+        try:
+            uploader.validate()
+        except JimengError as exc:
+            return error_response(str(exc))
+
+        buffer = io.BytesIO()
+        PILImage.new("RGB", (16, 16), (59, 130, 246)).save(buffer, "PNG")
+        prefix = str(payload.get("r2_prefix") or self._cfg("r2_prefix") or "jimeng/").strip().strip("/")
+        key = f"{prefix}/_test/{uuid.uuid4().hex}.png" if prefix else f"_test/{uuid.uuid4().hex}.png"
+
+        started = time.monotonic()
+        url = ""
+        try:
+            url = await asyncio.to_thread(
+                uploader.put, key, buffer.getvalue(), "image/png"
+            )
+
+            def fetch() -> tuple[int, str, int]:
+                import requests
+
+                resp = requests.get(url, timeout=20)
+                return resp.status_code, resp.headers.get("content-type", ""), len(resp.content)
+
+            status, content_type, size = await asyncio.to_thread(fetch)
+            elapsed = int((time.monotonic() - started) * 1000)
+            ok = status == 200 and size > 0
+            return json_response(
+                {
+                    "ok": ok,
+                    "url": url,
+                    "status": status,
+                    "content_type": content_type,
+                    "bytes": size,
+                    "latency_ms": elapsed,
+                    "message": "R2 上传与公网读取正常" if ok else "上传成功，但公网读取失败，请检查自定义域/WAF",
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            return error_response(f"R2 测试失败：{exc}")
+        finally:
+            try:
+                await asyncio.to_thread(uploader.delete, key)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[jimeng] 清理 R2 测试对象失败 %s: %s", key, exc)
 
     async def api_generate(self):
         payload = await request.json(default={}) or {}
@@ -1220,6 +1459,50 @@ class VolcJimengPlugin(Star):
             }
         )
 
+    async def api_gallery(self):
+        try:
+            page = max(1, request.query.get("page", 1, type=int))
+        except (TypeError, ValueError):
+            page = 1
+        page_size = 20
+
+        items: list[dict[str, Any]] = []
+        for record in self._history:
+            if record.get("status") != "ok":
+                continue
+            for index, file_info in enumerate(record.get("files") or []):
+                thumb = str(file_info.get("thumb") or "")
+                image = str(file_info.get("image") or "")
+                if not (
+                    (thumb and (self._images_dir / thumb).exists())
+                    or (image and (self._images_dir / image).exists())
+                ):
+                    continue
+                items.append(
+                    {
+                        "record_id": record.get("id"),
+                        "index": index,
+                        "prompt": record.get("prompt") or "",
+                        "created_at": record.get("created_at") or "",
+                        "size": record.get("size") or "",
+                        "source": record.get("source") or "",
+                        "user_name": record.get("user_name") or "",
+                    }
+                )
+
+        total = len(items)
+        pages = max(1, (total + page_size - 1) // page_size)
+        page = min(page, pages)
+        start = (page - 1) * page_size
+        return json_response(
+            {
+                "items": items[start : start + page_size],
+                "total": total,
+                "page": page,
+                "page_size": page_size,
+            }
+        )
+
     async def api_history_delete(self):
         payload = await request.json(default={})
         record_id = str((payload or {}).get("id") or "").strip()
@@ -1244,16 +1527,24 @@ class VolcJimengPlugin(Star):
         files = record.get("files") or []
         if index < 0 or index >= len(files):
             return error_response("图片不存在", status_code=404)
-        name = files[index].get("image" if full else "thumb") or files[index].get("image")
-        path = self._images_dir / str(name)
-        if not path.exists():
+        preferred = files[index].get("image" if full else "thumb")
+        candidates = [preferred, files[index].get("image"), files[index].get("thumb")]
+        path: Path | None = None
+        for candidate in candidates:
+            if not candidate:
+                continue
+            candidate_path = self._images_dir / str(candidate)
+            if candidate_path.exists():
+                path = candidate_path
+                break
+        if path is None:
             return error_response("文件已被清理", status_code=404)
         mime = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
         try:
             data = base64.b64encode(await asyncio.to_thread(path.read_bytes)).decode()
         except OSError as exc:
             return error_response(f"读取失败：{exc}", status_code=500)
-        return json_response({"data": f"data:{mime};base64,{data}", "mime": mime})
+        return json_response({"image": f"data:{mime};base64,{data}", "mime": mime})
 
     async def api_presets(self):
         return json_response({"items": self._presets})
@@ -1286,4 +1577,5 @@ class VolcJimengPlugin(Star):
         self._presets = [item for item in self._presets if item.get("id") != preset_id]
         _save_json(self._presets_path, self._presets)
         return json_response({"items": self._presets})
+
 

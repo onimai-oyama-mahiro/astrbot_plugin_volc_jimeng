@@ -72,6 +72,55 @@
     "slider": {"min": 1, "max": 14, "step": 1},
     "hint": "v4.6 最多支持 14 张输入图，参考图越多处理越慢、效果也可能下降。"
   },
+  "r2_enabled": {
+    "description": "使用 Cloudflare R2 托管参考图",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后，本地图片会先上传到 R2，再把 R2 公共链接交给即梦；即梦 4.6 只接受 http(s) URL。"
+  },
+  "r2_account_id": {
+    "description": "R2 Account ID",
+    "type": "string",
+    "default": "",
+    "hint": "S3 端点 https://<Account ID>.r2.cloudflarestorage.com 里的那串 ID。"
+  },
+  "r2_bucket": {
+    "description": "R2 Bucket",
+    "type": "string",
+    "default": "",
+    "hint": "例如 astrbot-jimeng。"
+  },
+  "r2_public_base": {
+    "description": "R2 公共访问地址",
+    "type": "string",
+    "default": "",
+    "hint": "绑定到 bucket 的自定义域名，例如 https://img.example.com；不要填 r2.dev（有限速，仅测试用）。"
+  },
+  "r2_access_key_id": {
+    "description": "R2 AccessKey ID",
+    "type": "string",
+    "default": "",
+    "hint": "R2 API Token 的 Access Key ID（只给目标 bucket 的 Object Read & Write）。"
+  },
+  "r2_secret_access_key": {
+    "description": "R2 SecretAccessKey",
+    "type": "string",
+    "default": "",
+    "secret": true,
+    "hint": "R2 API Token 的 Secret Access Key，只显示一次。"
+  },
+  "r2_prefix": {
+    "description": "R2 对象前缀",
+    "type": "string",
+    "default": "jimeng/",
+    "hint": "建议配合生命周期规则按前缀自动清理。"
+  },
+  "r2_delete_after": {
+    "description": "生成完成后删除 R2 对象",
+    "type": "bool",
+    "default": true,
+    "hint": "即梦任务完成后再删，避免下载一半 404；也可以再用 bucket 生命周期兜底。"
+  },
   "watermark": {
     "description": "添加 AI 水印",
     "type": "bool",

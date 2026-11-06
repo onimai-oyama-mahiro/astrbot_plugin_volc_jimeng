@@ -7,6 +7,7 @@ const state = {
   sizes: [],
   presets: [],
   history: { page: 1, page_size: 10, total: 0, items: [] },
+  gallery: { page: 1, page_size: 20, total: 0, items: [] },
   editingPreset: null,
   refImage: null,
   pollTimer: null,
@@ -81,9 +82,12 @@ function badge(status) {
 async function loadImageInto(img, recordId, index, full) {
   try {
     const result = await bridge.apiGet("image", { id: recordId, index: index || 0, full: full ? 1 : 0 });
-    img.src = result.data;
+    const src = result && (result.image || result.data);
+    if (!src) throw new Error("接口没有返回图片数据");
+    img.src = src;
   } catch (error) {
-    img.alt = "图片已失效";
+    img.alt = "图片加载失败";
+    img.title = error.message || String(error);
   }
 }
 
@@ -97,6 +101,7 @@ function switchTab(name) {
     panel.classList.toggle("active", panel.id === `tab-${name}`);
   });
   if (name === "history") loadHistory(state.history.page);
+  if (name === "gallery") loadGallery(state.gallery.page);
   if (name === "presets") loadPresets();
   if (name === "overview") loadOverview();
 }
@@ -175,6 +180,15 @@ async function loadConfig() {
   $("cfg-img2img").checked = cfg.enable_img2img;
   $("cfg-maxinputs").value = cfg.max_input_images;
   $("ref-field").classList.toggle("hidden", !cfg.enable_img2img);
+  $("cfg-r2").checked = cfg.r2_enabled;
+  $("cfg-r2-delete").checked = cfg.r2_delete_after;
+  $("cfg-r2-account").value = cfg.r2_account_id || "";
+  $("cfg-r2-bucket").value = cfg.r2_bucket || "";
+  $("cfg-r2-base").value = cfg.r2_public_base || "";
+  $("cfg-r2-prefix").value = cfg.r2_prefix || "jimeng/";
+  $("cfg-r2-ak").value = cfg.r2_access_key_id || "";
+  $("cfg-r2-sk").value = "";
+  $("cfg-r2-sk").placeholder = cfg.r2_secret_access_key ? "已保存，留空表示不修改" : "填写 R2 Secret";
   if (!cfg.enable_img2img) {
     state.refImage = null;
     $("ref-url").value = "";
@@ -215,6 +229,14 @@ async function saveConfig() {
     force_single: $("cfg-force").checked,
     enable_img2img: $("cfg-img2img").checked,
     max_input_images: Number($("cfg-maxinputs").value),
+    r2_enabled: $("cfg-r2").checked,
+    r2_delete_after: $("cfg-r2-delete").checked,
+    r2_account_id: $("cfg-r2-account").value.trim(),
+    r2_bucket: $("cfg-r2-bucket").value.trim(),
+    r2_public_base: $("cfg-r2-base").value.trim(),
+    r2_prefix: $("cfg-r2-prefix").value.trim(),
+    r2_access_key_id: $("cfg-r2-ak").value.trim(),
+    r2_secret_access_key: $("cfg-r2-sk").value,
     watermark: $("cfg-watermark").checked,
     timeout: Number($("cfg-timeout").value),
     poll_interval: Number($("cfg-interval").value),
@@ -247,6 +269,37 @@ async function clearCredentials() {
   toast("凭证已清除");
   await loadConfig();
   await loadOverview();
+}
+
+async function testR2() {
+  const button = $("btn-r2-test");
+  button.disabled = true;
+  $("r2-test-result").textContent = "测试中…";
+  try {
+    const result = await apiPost("r2/test", {
+      r2_account_id: $("cfg-r2-account").value.trim(),
+      r2_bucket: $("cfg-r2-bucket").value.trim(),
+      r2_public_base: $("cfg-r2-base").value.trim(),
+      r2_access_key_id: $("cfg-r2-ak").value.trim(),
+      r2_secret_access_key: $("cfg-r2-sk").value,
+      r2_prefix: $("cfg-r2-prefix").value.trim(),
+    });
+    $("r2-test-result").textContent = result.ok
+      ? `✅ ${result.status} · ${result.latency_ms}ms · ${result.bytes}B`
+      : `⚠️ ${result.message || "公网读取失败"}`;
+    if (result.ok) toast("R2 上传与公网读取正常");
+  } catch (error) {
+    $("r2-test-result").textContent = `❌ ${error.message || error}`;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function clearR2() {
+  if (!(await askConfirm("确定清除已保存的 R2 AccessKey / Secret 吗？"))) return;
+  await apiPost("config/save", { clear_r2_credentials: true });
+  toast("R2 凭证已清除");
+  await loadConfig();
 }
 
 /* ------------------------------------------------------------- generate */
@@ -398,8 +451,35 @@ async function loadHistory(page) {
   $("btn-next").disabled = data.page >= pages;
 }
 
-async function deleteRecord(id) {
-  if (!(await askConfirm("删除这条记录和对应图片？"))) return;
+async function loadGallery(page) {
+  const target = Math.max(1, page || 1);
+  const data = await apiGet("gallery", { page: target });
+  state.gallery = { ...data, page: target };
+
+  $("gallery-count").textContent = `共 ${data.total} 张`;
+  const grid = $("gallery-grid");
+  grid.innerHTML = "";
+  if (!data.items.length) {
+    grid.innerHTML = '<div class="empty">还没有图片</div>';
+  }
+  for (const item of data.items) {
+    const box = document.createElement("div");
+    box.className = "item";
+    box.innerHTML = `<img alt="图库图片" /><div class="cap">${escapeHtml(item.prompt || "")}</div>`;
+    const img = box.querySelector("img");
+    loadImageInto(img, item.record_id, item.index, false);
+    img.title = item.created_at || "";
+    img.addEventListener("click", () => openModal(item.record_id, item.index));
+    grid.appendChild(box);
+  }
+
+  const pages = Math.max(1, Math.ceil(data.total / data.page_size));
+  $("gallery-page-info").textContent = `第 ${data.page} / ${pages} 页`;
+  $("gallery-prev").disabled = data.page <= 1;
+  $("gallery-next").disabled = data.page >= pages;
+}
+
+async function deleteRecord(id) {  if (!(await askConfirm("删除这条记录和对应图片？"))) return;
   await apiPost("history/delete", { id });
   toast("已删除");
   await loadHistory(state.history.page);
@@ -554,11 +634,15 @@ async function init() {
   $("btn-refresh").addEventListener("click", () => refreshAll().then(() => toast("已刷新")));
   $("btn-save").addEventListener("click", saveConfig);
   $("btn-clear").addEventListener("click", clearCredentials);
+  $("btn-r2-test").addEventListener("click", testR2);
+  $("btn-r2-clear").addEventListener("click", clearR2);
   $("cfg-scale").addEventListener("input", () => {
     $("cfg-scale-val").textContent = $("cfg-scale").value;
   });
   $("btn-prev").addEventListener("click", () => loadHistory(state.history.page - 1));
   $("btn-next").addEventListener("click", () => loadHistory(state.history.page + 1));
+  $("gallery-prev").addEventListener("click", () => loadGallery(state.gallery.page - 1));
+  $("gallery-next").addEventListener("click", () => loadGallery(state.gallery.page + 1));
   $("btn-preset-save").addEventListener("click", savePreset);
   $("btn-preset-reset").addEventListener("click", resetPresetForm);
   $("modal-close").addEventListener("click", closeModal);

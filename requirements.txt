@@ -1,1 +1,2 @@
 volcengine>=1.0.229
+boto3>=1.34

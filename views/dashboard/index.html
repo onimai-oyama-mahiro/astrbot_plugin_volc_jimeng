@@ -13,7 +13,7 @@
           <div class="logo">🎨</div>
           <div class="brand-text">
             <h1>即梦生图</h1>
-            <p>火山视觉 · 即梦AI-图片生成4.6</p>
+            <p>火山视觉 · 即梦AI-图片生成 4.6 / 4.0 / 3.1</p>
           </div>
         </div>
         <div class="topbar-actions">
@@ -86,14 +86,14 @@
               <li><b>指令</b><code>/画图 雨夜霓虹街道</code></li>
               <li><b>本页</b>点「生成」，手动填提示词</li>
             </ul>
-            <p class="tip">v4.6 一次可能生成多张（按张计费），插件默认强制单图。</p>
+            <p class="tip">4.6 / 4.0 一次可能生成多张（按张计费），插件默认强制单图；3.1 固定单图。</p>
           </div>
         </div>
 
         <div class="card">
           <div class="card-head">
             <h2>最近生成</h2>
-            <button class="btn btn-ghost btn-sm" data-goto="history" type="button">查看全部</button>
+            <button class="btn btn-ghost btn-sm" data-goto="gallery" type="button">查看全部</button>
           </div>
           <div id="recent-grid" class="gallery">
             <div class="empty">还没有生成记录</div>
@@ -235,7 +235,7 @@
         </div>
 
         <div class="card">
-          <div class="card-head"><h2>模型</h2><span class="muted">当前仅开放 4.6</span></div>
+          <div class="card-head"><h2>模型</h2><span class="muted">内置 4.6 / 4.0 / 3.1</span></div>
           <div class="grid-2 settings-grid">
             <label class="field">
               <span>生图模型（req_key）</span>
@@ -246,7 +246,7 @@
               <select id="cfg-size" class="select"></select>
             </label>
           </div>
-          <p class="tip">页面显示中文名称，实际请求使用内部 req_key（jimeng_seedream46_cvtob）。</p>
+          <p class="tip">4.6 / 4.0 支持文生图和图生图；文生图3.1 仅支持文生图，带参考图会提示不支持。3.1 尺寸面积最高 2048×2048。页面显示中文名称，实际请求使用内部 req_key。</p>
         </div>
 
         <div class="card">
@@ -286,6 +286,23 @@
             <label class="switch"><input id="cfg-command" type="checkbox" /><span>启用 /画图 指令</span></label>
           </div>
           <p class="tip">「工具内等待」关闭时，图片会在画好后单独发送，可避免模型工具超时（推荐）。</p>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h2>生成完成后的反馈</h2><span class="muted">消息与二次回复</span></div>
+          <label class="field">
+            <span>反馈方式</span>
+            <select id="cfg-feedback-mode" class="select"></select>
+          </label>
+          <label class="field">
+            <span>大模型回图提示词（仅带「大模型回复」的方式使用）</span>
+            <textarea id="cfg-followup-prompt" class="textarea" rows="3" placeholder="图片已经生成完成……"></textarea>
+          </label>
+          <label class="field">
+            <span>回图模型 Provider ID（留空用当前会话模型）</span>
+            <input id="cfg-followup-provider" class="input" placeholder="例如 deepseek_chat" />
+          </label>
+          <p class="tip">带「大模型回复」的方式会额外调用一次聊天模型，需要该模型支持图片输入；失败时只记录日志，图片照常发送。</p>
         </div>
 
         <div class="card">

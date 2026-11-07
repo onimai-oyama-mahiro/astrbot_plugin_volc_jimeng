@@ -202,6 +202,10 @@ async function loadConfig() {
   $("cfg-toolwait").checked = cfg.tool_wait;
   $("cfg-hint").checked = cfg.inject_hint;
   $("cfg-command").checked = cfg.enable_command;
+  fillSelect($("cfg-feedback-mode"), data.feedback_modes || []);
+  $("cfg-feedback-mode").value = cfg.feedback_mode || "image_llm";
+  $("cfg-followup-prompt").value = cfg.llm_followup_prompt || "";
+  $("cfg-followup-provider").value = cfg.llm_followup_provider_id || "";
   $("cfg-daily").value = cfg.daily_limit;
   $("cfg-userdaily").value = cfg.user_daily_limit;
   $("cfg-cooldown").value = cfg.cooldown;
@@ -245,6 +249,9 @@ async function saveConfig() {
     tool_wait: $("cfg-toolwait").checked,
     inject_hint: $("cfg-hint").checked,
     enable_command: $("cfg-command").checked,
+    feedback_mode: $("cfg-feedback-mode").value,
+    llm_followup_prompt: $("cfg-followup-prompt").value,
+    llm_followup_provider_id: $("cfg-followup-provider").value.trim(),
     daily_limit: Number($("cfg-daily").value),
     user_daily_limit: Number($("cfg-userdaily").value),
     cooldown: Number($("cfg-cooldown").value),

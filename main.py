@@ -1,8 +1,8 @@
-"""即梦AI-图片生成4.6（火山视觉智能开放平台）AstrBot 插件。
+"""即梦AI-图片生成（火山视觉智能开放平台）AstrBot 插件。
 
 - 通过官方 volcengine SDK 调用 visual.volcengineapi.com（AK/SK 签名）
 - 注册 LLM 工具，让模型自主决定是否画图
-- 提供插件可视化视图：概览 / 生成 / 历史 / 预设 / 设置
+- 提供插件可视化视图：概览 / 生成 / 历史 / 图库 / 预设 / 设置
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ import asyncio
 import base64
 import io
 import json
+import math
 import os
 import re
 import time
@@ -29,11 +30,47 @@ from PIL import Image as PILImage
 from PIL import ImageOps
 
 PLUGIN_NAME = "astrbot_plugin_volc_jimeng"
-PLUGIN_VERSION = "1.3.0"
+PLUGIN_VERSION = "1.7.0"
 
-# req_key -> 中文展示名（目前只开放 4.6）
+# req_key -> 中文展示名（4.6 / 4.0 / 3.1）
 REQ_KEYS: dict[str, str] = {
     "jimeng_seedream46_cvtob": "即梦AI-图片生成4.6",
+    "jimeng_t2i_v40": "即梦AI-图片生成4.0",
+    "jimeng_t2i_v31": "即梦AI-文生图3.1",
+}
+
+MODEL_INFO: dict[str, dict[str, Any]] = {
+    "jimeng_seedream46_cvtob": {
+        "label": "即梦AI-图片生成4.6",
+        "img2img": True,
+        "max_inputs": 14,
+        "min_area": 1024 * 1024,
+        "max_area": 4096 * 4096,
+    },
+    "jimeng_t2i_v40": {
+        "label": "即梦AI-图片生成4.0",
+        "img2img": True,
+        "max_inputs": 10,
+        "min_area": 1024 * 1024,
+        "max_area": 4096 * 4096,
+    },
+    "jimeng_t2i_v31": {
+        "label": "即梦AI-文生图3.1",
+        "img2img": False,
+        "max_inputs": 0,
+        "min_area": 512 * 512,
+        "max_area": 2048 * 2048,
+    },
+}
+
+# 生成完成后的反馈方式（值是文案，顺序即设置页下拉顺序）
+FEEDBACK_MODES: dict[str, str] = {
+    "image_only": "仅图片",
+    "image_size": "图片 + 尺寸",
+    "image_caption": "图片 + 尺寸和完整提示词",
+    "image_llm": "图片 + 大模型回复",
+    "image_size_llm": "图片 + 尺寸 + 大模型回复",
+    "image_caption_llm": "图片 + 尺寸和完整提示词 + 大模型回复",
 }
 
 # 尺寸档位：内部值 -> 展示名
@@ -46,6 +83,9 @@ SIZE_PRESETS: dict[str, str] = {
     "3024x1296": "2K · 21:9（3024×1296）",
     "4096x4096": "4K · 1:1（4096×4096）",
     "5404x3040": "4K · 16:9（5404×3040）",
+    "1440x2560": "2K · 9:16（1440×2560）",
+    "1728x2304": "2K · 3:4（1728×2304）",
+    "2160x3840": "4K · 9:16（2160×3840）",
 }
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -57,6 +97,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "force_single": True,
     "enable_img2img": True,
     "max_input_images": 4,
+    "feedback_mode": "image_llm",
+    "llm_followup_prompt": (
+        "图片已经生成完成。请结合这张图和用户原本的需求，用自然、简短的话告诉用户结果，不要重复提示词。"
+    ),
+    "llm_followup_provider_id": "",
     "r2_enabled": False,
     "r2_account_id": "",
     "r2_bucket": "",
@@ -92,8 +137,73 @@ DRAW_HINT = (
 
 SIZE_HINT = (
     "提示词建议包含主体、场景、风格、光线和构图，不超过 800 字；"
-    "v4.6 一次可能生成多张，插件默认强制单图。"
+    "4.6 / 4.0 一次可能生成多张，插件默认强制单图；3.1 固定单图。"
 )
+
+
+def _parse_ratio(value: str | None) -> tuple[int, int] | None:
+    if not value:
+        return None
+    match = re.fullmatch(r"\s*(\d{1,3})\s*[:：/]\s*(\d{1,3})\s*", str(value))
+    if not match:
+        return None
+    width, height = int(match.group(1)), int(match.group(2))
+    if width <= 0 or height <= 0:
+        return None
+    return width, height
+
+
+def _ratio_label(width: int, height: int) -> str:
+    divisor = math.gcd(width, height) or 1
+    return f"{width // divisor}:{height // divisor}"
+
+
+def _dims_for_ratio(ratio_w: int, ratio_h: int, area: int) -> tuple[int, int]:
+    """按面积和比例算宽高，满足 1M～4096²、宽高比 1/3～3、边长≤4096。"""
+    ratio = min(3.0, max(1 / 3, ratio_w / ratio_h))
+    width = math.sqrt(area * ratio)
+    height = width / ratio
+
+    scale = min(1.0, 4096.0 / max(width, height))
+    width *= scale
+    height *= scale
+
+    min_area = 1024 * 1024
+    if width * height < min_area:
+        factor = math.sqrt(min_area / (width * height))
+        width *= factor
+        height *= factor
+
+    width = max(16, int(round(width)))
+    height = max(16, int(round(width / ratio)))
+
+    max_area = 4096 * 4096
+
+    for _ in range(3):
+        current = width * height
+        if current < min_area:
+            factor = math.sqrt(min_area / current)
+            width = max(16, int(width * factor))
+            height = max(16, int(round(width / ratio)))
+        elif current > max_area:
+            factor = math.sqrt(max_area / current)
+            width = max(16, int(width * factor))
+            height = max(16, int(round(width / ratio)))
+        else:
+            break
+
+    # 四舍五入可能刚好差几个像素，最后再微调到达标
+    guard = 0
+    while width * height < min_area and guard < 10000:
+        width += 1
+        height = max(16, int(round(width / ratio)))
+        guard += 1
+    guard = 0
+    while width * height > max_area and guard < 10000:
+        width -= 1
+        height = max(16, int(round(width / ratio)))
+        guard += 1
+    return width, height
 
 
 class JimengError(RuntimeError):
@@ -254,7 +364,7 @@ class R2Uploader:
         self._client().delete_object(Bucket=self.bucket, Key=key)
 
 
-@register(PLUGIN_NAME, "shira", "即梦AI-图片生成4.6 生图与可视化控制台", PLUGIN_VERSION)
+@register(PLUGIN_NAME, "shira", "即梦AI-图片生成（4.6 / 4.0 / 3.1）与可视化控制台", PLUGIN_VERSION)
 class VolcJimengPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
         super().__init__(context)
@@ -360,6 +470,31 @@ class VolcJimengPlugin(Star):
             req_key = next(iter(REQ_KEYS))
         return req_key
 
+    def _model_info(self) -> dict[str, Any]:
+        return MODEL_INFO.get(self._req_key(), MODEL_INFO["jimeng_seedream46_cvtob"])
+
+    def _model_label(self) -> str:
+        return str(self._model_info().get("label") or self._req_key())
+
+    def _model_supports_img2img(self) -> bool:
+        return bool(self._model_info().get("img2img"))
+
+    def _validate_model_size(self, width: int, height: int) -> None:
+        info = self._model_info()
+        area = width * height
+        min_area = int(info.get("min_area") or 0)
+        max_area = int(info.get("max_area") or 0)
+        if min_area and area < min_area:
+            min_side = int(math.sqrt(min_area))
+            raise JimengError(
+                f"{self._model_label()} 的最小尺寸约 {min_side}×{min_side}，当前 {width}×{height} 太小，请换大一点的尺寸。"
+            )
+        if max_area and area > max_area:
+            max_side = int(math.sqrt(max_area))
+            raise JimengError(
+                f"{self._model_label()} 的最大尺寸约 {max_side}×{max_side}，当前 {width}×{height} 超出范围，请换小一点的尺寸。"
+            )
+
     def _size_key(self, size: str | None = None) -> str:
         candidate = (size or str(self._cfg("size_preset") or "")).strip()
         if candidate not in SIZE_PRESETS:
@@ -416,11 +551,19 @@ class VolcJimengPlugin(Star):
 
     # ---------------------------------------------------------------- history
 
+    def _size_text(self, record: dict[str, Any]) -> str:
+        size = str(record.get("size") or "")
+        if size in SIZE_PRESETS:
+            return SIZE_PRESETS[size]
+        ratio = str(record.get("ratio") or "")
+        return f"{size}" + (f"（{ratio}）" if ratio else "")
+
     def _public_record(self, record: dict[str, Any]) -> dict[str, Any]:
         return {
             "id": record.get("id"),
             "prompt": record.get("prompt"),
             "size": record.get("size"),
+            "ratio": record.get("ratio") or "",
             "status": record.get("status"),
             "error": record.get("error") or "",
             "created_at": record.get("created_at"),
@@ -506,17 +649,21 @@ class VolcJimengPlugin(Star):
         text = str(exc)
         if "InvalidAuthorization" in text or "Invalid Authorization" in text:
             return "鉴权失败：请检查 AccessKey ID / SecretAccessKey，以及服务器时间是否准确。"
+        if "50400" in text or "Access Denied" in text:
+            return "没有权限：当前账号未开通这个模型，或子账号缺少 cv 服务权限。"
         if "50413" in text or "Text Risk Not Pass" in text:
             return "提示词未通过内容审核，请换一种描述后重试。"
+        if "50200" in text or "invalid param" in text:
+            return f"参数不合法：{text[:200]}"
         if "unsupported protocol scheme" in text or "50220" in text:
             return (
-                "参考图必须是公网 http(s) URL；即梦 4.6 不接受 base64/data URI。"
+                "参考图必须是公网 http(s) URL；当前模型不接受 base64/data URI。"
                 "请在 AstrBot 系统设置里配置 callback_api_base，或直接使用图片链接。"
             )
         if "Request Has Reached API Limit" in text or "Too Many Requests" in text or "HTTP 429" in text:
             return "调用过于频繁，已触发服务端限流，请稍后再试。"
         if "AccessDenied" in text or "HTTP 403" in text:
-            return "没有权限：请在控制台确认已开通「即梦AI-图片生成4.6」，并检查子账号策略。"
+            return "没有权限：请在控制台确认已开通当前模型，并检查子账号策略。"
         return text[:300] or "未知错误"
 
     def _check_response(self, resp: dict[str, Any]) -> dict[str, Any]:
@@ -542,7 +689,7 @@ class VolcJimengPlugin(Star):
             ) or str(code) == "50220":
                 raise JimengError(
                     f"参考图无法被服务端读取（{code}: {message}）。"
-                    "即梦 4.6 只接受公网 http(s) URL，请配置 callback_api_base 或改用图片链接。"
+                    "当前模型只接受公网 http(s) URL，请配置 callback_api_base 或改用图片链接。"
                 )
             raise JimengError(f"{code}: {message}" + (f"（request_id: {request_id}）" if request_id else ""))
         return resp.get("data") or {}
@@ -616,7 +763,7 @@ class VolcJimengPlugin(Star):
     async def _to_public_image_ref(self, path: Path) -> str:
         """把本地图片注册到 AstrBot 文件服务，拿到公网可访问的 URL。
 
-        即梦 4.6 的 image_urls 只接受 http(s) URL（实测 data URI 会报
+        当前模型的 image_urls 只接受 http(s) URL（实测 data URI 会报
         unsupported protocol scheme），所以本地图片必须能变成公网链接。
         """
         try:
@@ -627,7 +774,7 @@ class VolcJimengPlugin(Star):
             logger.debug("[jimeng] 文件服务不可用: %s", exc)
         raise JimengError(
             "参考图需要公网可访问的 URL。请在 AstrBot「系统设置 → 网络」配置可被外网访问的 "
-            "callback_api_base，或改为发送图片链接（即梦 4.6 不接受 base64/data URI）。"
+            "callback_api_base，或改为发送图片链接（当前模型不接受 base64/data URI）。"
         )
 
     def _r2_uploader(self) -> R2Uploader:
@@ -667,20 +814,56 @@ class VolcJimengPlugin(Star):
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[jimeng] 删除 R2 对象失败 %s: %s", key, exc)
 
-    async def _prepare_input_images(self, refs: list[str]) -> tuple[list[str], list[str]]:
+    @staticmethod
+    def _local_ratio(path: Path) -> tuple[int, int] | None:
+        try:
+            with PILImage.open(path) as image:
+                return image.size
+        except Exception:  # noqa: BLE001
+            return None
+
+    async def _remote_ratio(self, url: str) -> tuple[int, int] | None:
+        def work() -> tuple[int, int] | None:
+            import requests
+            from io import BytesIO
+
+            resp = requests.get(url, timeout=30)
+            resp.raise_for_status()
+            if len(resp.content) > 15 * 1024 * 1024:
+                return None
+            with PILImage.open(BytesIO(resp.content)) as image:
+                return image.size
+
+        try:
+            return await asyncio.to_thread(work)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[jimeng] 读取参考图尺寸失败 %s: %s", url[:80], exc)
+            return None
+
+    async def _prepare_input_images(
+        self, refs: list[str]
+    ) -> tuple[list[str], list[str], tuple[int, int] | None]:
         if not refs:
-            return [], []
+            return [], [], None
+        if not self._model_supports_img2img():
+            raise JimengError(
+                f"{self._model_label()} 不支持图生图，请切换到「即梦AI-图片生成4.6 / 4.0」，或去掉参考图后重试。"
+            )
         if not bool(self._cfg("enable_img2img")):
             raise JimengError("图生图已在设置中关闭。")
-        limit = max(1, min(14, self._cfg_int("max_input_images", 4)))
+        model_max = int(self._model_info().get("max_inputs") or 1)
+        limit = max(1, min(model_max, self._cfg_int("max_input_images", 4)))
         prepared: list[str] = []
         uploaded_keys: list[str] = []
+        first_ratio: tuple[int, int] | None = None
         for ref in refs[:limit]:
             ref = (ref or "").strip()
             if not ref:
                 continue
             if ref.startswith(("http://", "https://")):
                 prepared.append(ref)
+                if first_ratio is None:
+                    first_ratio = await self._remote_ratio(ref)
                 continue
             try:
                 if ref.startswith("base64://"):
@@ -690,6 +873,8 @@ class VolcJimengPlugin(Star):
                 else:
                     source = Path(ref)
                 normalized = await asyncio.to_thread(self._normalize_local_image, source)
+                if first_ratio is None:
+                    first_ratio = await asyncio.to_thread(self._local_ratio, normalized)
                 if bool(self._cfg("r2_enabled")):
                     try:
                         url, key = await self._upload_for_jimeng(normalized)
@@ -707,9 +892,9 @@ class VolcJimengPlugin(Star):
                 logger.warning("[jimeng] 参考图处理失败 %s: %s", ref[:80], exc)
         if not prepared:
             raise JimengError(
-                "参考图读取失败。请确认图片存在，且能通过公网 URL 访问（即梦 4.6 不接受 base64）。"
+                "参考图读取失败。请确认图片存在，且能通过公网 URL 访问（当前模型不接受 base64）。"
             )
-        return prepared, uploaded_keys
+        return prepared, uploaded_keys, first_ratio
 
     async def _submit(
         self,
@@ -721,18 +906,20 @@ class VolcJimengPlugin(Star):
         payload: dict[str, Any] = {
             "req_key": self._req_key(),
             "prompt": prompt,
-            "scale": self._cfg_int("scale", 50),
-            "force_single": bool(self._cfg("force_single")),
-            "min_ratio": 1 / 3,
-            "max_ratio": 3,
         }
+        if self._req_key() != "jimeng_t2i_v31":
+            payload.update(
+                {
+                    "scale": self._cfg_int("scale", 50),
+                    "force_single": bool(self._cfg("force_single")),
+                    "min_ratio": 1 / 3,
+                    "max_ratio": 3,
+                }
+            )
+        payload["width"] = width
+        payload["height"] = height
         if image_urls:
-            # 图生图：只给面积，让模型结合参考图决定宽高比
-            payload["size"] = width * height
             payload["image_urls"] = image_urls
-        else:
-            payload["width"] = width
-            payload["height"] = height
         resp = await self._call(self._client().submit, payload)
         data = self._check_response(resp)
         task_id = str(data.get("task_id") or "").strip()
@@ -822,6 +1009,7 @@ class VolcJimengPlugin(Star):
         prompt: str,
         *,
         size: str | None = None,
+        ratio: str | None = None,
         input_images: list[str] | None = None,
         user_id: str = "web",
         user_name: str = "WebUI",
@@ -837,13 +1025,19 @@ class VolcJimengPlugin(Star):
             raise JimengError("尚未配置 AccessKey ID / SecretAccessKey，请到插件设置页填写。")
 
         size_key = self._size_key(size)
-        width, height = _parse_size(size_key)
+        preset_width, preset_height = _parse_size(size_key)
+        area = preset_width * preset_height
+        ratio_value = _parse_ratio(ratio)
+        if ratio and ratio_value is None:
+            raise JimengError(f"比例格式不正确：{ratio}，请使用 9:16 这种写法。")
+        width, height = preset_width, preset_height
         record_id = uuid.uuid4().hex[:12]
         started = time.monotonic()
         record: dict[str, Any] = {
             "id": record_id,
             "prompt": prompt,
-            "size": size_key,
+            "size": f"{width}x{height}",
+            "ratio": _ratio_label(width, height),
             "req_key": self._req_key(),
             "status": "running",
             "created_at": _iso(),
@@ -857,9 +1051,15 @@ class VolcJimengPlugin(Star):
 
         uploaded_keys: list[str] = []
         try:
-            prepared_images, uploaded_keys = await self._prepare_input_images(
+            prepared_images, uploaded_keys, ref_ratio = await self._prepare_input_images(
                 list(input_images or [])
             )
+            target_ratio = ref_ratio or ratio_value
+            if target_ratio:
+                width, height = _dims_for_ratio(target_ratio[0], target_ratio[1], area)
+                record["size"] = f"{width}x{height}"
+                record["ratio"] = _ratio_label(target_ratio[0], target_ratio[1])
+            self._validate_model_size(width, height)
             record["inputs"] = len(prepared_images)
             async with self._sem:
                 task_id = await self._submit(prompt, width, height, prepared_images)
@@ -897,16 +1097,110 @@ class VolcJimengPlugin(Star):
         self._consume_quota(user_id, is_admin)
         return record
 
-    async def _send_record(self, umo: str, record: dict[str, Any]) -> None:
-        chain = MessageChain().message(
-            f"🎨 画好了 · {SIZE_PRESETS.get(record['size'], record['size'])}\n"
-            f"提示词：{record['prompt'][:120]}"
+    def _feedback_mode(self) -> str:
+        mode = str(self._cfg("feedback_mode") or "").strip()
+        return mode if mode in FEEDBACK_MODES else "image_llm"
+
+    def _needs_llm_reply(self) -> bool:
+        return self._feedback_mode().endswith("_llm")
+
+    def _caption_style(self) -> str:
+        mode = self._feedback_mode()
+        if "caption" in mode:
+            return "full"
+        if "size" in mode:
+            return "size"
+        return "none"
+
+    def _caption_text(self, record: dict[str, Any]) -> str:
+        style = self._caption_style()
+        if style == "none":
+            return ""
+        if style == "size":
+            return f"🎨 {self._size_text(record)}"
+        return (
+            f"🎨 画好了 · {self._size_text(record)}\n"
+            f"提示词：{record['prompt']}"
         )
+
+    def _result_chain(self, record: dict[str, Any], llm_text: str = "") -> MessageChain:
+        chain = MessageChain()
+        caption = self._caption_text(record)
+        if caption:
+            chain.message(caption)
         for file_info in record.get("files") or []:
             path = self._images_dir / file_info["image"]
             if path.exists():
                 chain.file_image(str(path))
-        await self.context.send_message(umo, chain)
+        if llm_text:
+            chain.message(llm_text)
+        return chain
+
+    async def _send_feedback(
+        self, umo: str, record: dict[str, Any], user_message: str = ""
+    ) -> None:
+        llm_text = ""
+        if self._needs_llm_reply():
+            llm_text = await self._llm_followup(umo, record, user_message)
+        await self.context.send_message(umo, self._result_chain(record, llm_text))
+
+    async def _llm_image_ref(self, path: Path) -> str:
+        try:
+            url = await Comp.Image.fromFileSystem(str(path)).register_to_file_service()
+            if isinstance(url, str) and url.startswith(("http://", "https://")):
+                return url
+        except Exception:  # noqa: BLE001
+            pass
+
+        def work() -> str:
+            with PILImage.open(path) as image:
+                image = image.convert("RGB")
+                image.thumbnail((1024, 1024))
+                buffer = io.BytesIO()
+                image.save(buffer, "JPEG", quality=85)
+            return "data:image/jpeg;base64," + base64.b64encode(buffer.getvalue()).decode()
+
+        return await asyncio.to_thread(work)
+
+    async def _llm_followup(
+        self, umo: str, record: dict[str, Any], user_message: str = ""
+    ) -> str:
+        if not self._needs_llm_reply():
+            return ""
+        files = record.get("files") or []
+        if not files:
+            return ""
+        path = self._images_dir / str(files[0].get("image") or "")
+        if not path.exists():
+            return ""
+
+        template = str(self._cfg("llm_followup_prompt") or "").strip()
+        if not template:
+            template = "图片已经生成完成，请结合这张图告诉用户结果。"
+        text = (
+            template.replace("{prompt}", str(record.get("prompt") or ""))
+            .replace("{user_message}", user_message or "")
+            .replace("{size}", self._size_text(record))
+        )
+        if "{prompt}" not in template:
+            text += f"\n\n生图提示词：{record.get('prompt') or ''}"
+        if "{user_message}" not in template and user_message:
+            text += f"\n用户原消息：{user_message}"
+
+        try:
+            provider_id = str(self._cfg("llm_followup_provider_id") or "").strip()
+            if not provider_id:
+                provider_id = await self.context.get_current_chat_provider_id(umo)
+            image_urls = [await self._llm_image_ref(path)]
+            resp = await self.context.llm_generate(
+                chat_provider_id=provider_id,
+                prompt=text,
+                image_urls=image_urls,
+            )
+            return str(getattr(resp, "completion_text", "") or "").strip()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[jimeng] 大模型回图失败: %s", exc)
+            return ""
 
     async def _background_generate(
         self,
@@ -916,17 +1210,20 @@ class VolcJimengPlugin(Star):
         user_id: str,
         user_name: str,
         is_admin: bool,
+        ratio: str = "",
+        user_message: str = "",
     ) -> None:
         try:
             record = await self._generate(
                 prompt,
+                ratio=ratio,
                 input_images=input_images,
                 user_id=user_id,
                 user_name=user_name,
                 source="tool",
                 is_admin=is_admin,
             )
-            await self._send_record(umo, record)
+            await self._send_feedback(umo, record, user_message)
         except Exception as exc:  # noqa: BLE001
             try:
                 await self.context.send_message(
@@ -939,14 +1236,27 @@ class VolcJimengPlugin(Star):
 
     @filter.command("画图")
     async def cmd_draw(self, event: AstrMessageEvent):
-        """用「即梦AI-图片生成4.6」画一张图：/画图 一只在雨里的猫"""
+        """用「即梦AI-图片生成」画一张图：/画图 一只在雨里的猫"""
         if not bool(self._cfg("enable_command")):
             return
 
-        match = re.match(r"^[/／]?\s*画图\s*(.*)$", event.message_str or "", re.S)
-        prompt = (match.group(1).strip() if match else "")
+        body = re.sub(r"^[/／]?\s*画图\s*", "", event.message_str or "", count=1).strip()
+        ratio = None
+        match = re.match(
+            r"^(?:--ratio\s+)?(\d{1,3}\s*[:：/]\s*\d{1,3})\s+(.*)$", body, re.S
+        )
+        if match:
+            ratio = (
+                match.group(1)
+                .replace("：", ":")
+                .replace("/", ":")
+                .replace(" ", "")
+            )
+            prompt = match.group(2).strip()
+        else:
+            prompt = body
         if not prompt:
-            yield event.plain_result("用法：/画图 一只在窗边晒太阳的橘猫，插画风")
+            yield event.plain_result("用法：/画图 [9:16] 一只在窗边晒太阳的橘猫，插画风")
             return
 
         user_id = event.get_sender_id() or "unknown"
@@ -962,6 +1272,7 @@ class VolcJimengPlugin(Star):
         try:
             record = await self._generate(
                 prompt,
+                ratio=ratio,
                 input_images=input_images,
                 user_id=user_id,
                 user_name=event.get_sender_name() or user_id,
@@ -972,17 +1283,28 @@ class VolcJimengPlugin(Star):
             yield event.plain_result(f"❌ 生成失败：{exc}")
             return
 
-        chain = [
-            Comp.Plain(f"🎨 {SIZE_PRESETS.get(record['size'], record['size'])}\n")
-        ]
+        llm_text = ""
+        if self._needs_llm_reply():
+            llm_text = await self._llm_followup(
+                event.unified_msg_origin, record, event.message_str or ""
+            )
+
+        chain = []
+        caption = self._caption_text(record)
+        if caption:
+            chain.append(Comp.Plain(caption))
         for file_info in record.get("files") or []:
             path = self._images_dir / file_info["image"]
             if path.exists():
                 chain.append(Comp.Image.fromFileSystem(str(path)))
+        if llm_text:
+            chain.append(Comp.Plain(llm_text))
         yield event.chain_result(chain)
 
     @filter.llm_tool(name="jimeng_draw_image")
-    async def tool_jimeng_draw_image(self, event: AstrMessageEvent, prompt: str):
+    async def tool_jimeng_draw_image(
+        self, event: AstrMessageEvent, prompt: str, ratio: str = ""
+    ):
         """根据文字描述生成并发送一张图片。
 
         当用户想要看到图片（插画、照片、表情包、海报、示意图、头像等），
@@ -991,6 +1313,7 @@ class VolcJimengPlugin(Star):
 
         Args:
             prompt(string): 完整的画面描述，包含主体、场景、风格、光线、构图；改图时说明要改什么、保留什么
+            ratio(string): 可选，画面比例，例如 9:16、16:9、1:1；用户没有明确要求就留空
         """
         if not bool(self._cfg("enable_llm_tool")):
             return "画图工具已关闭。"
@@ -1015,6 +1338,7 @@ class VolcJimengPlugin(Star):
             try:
                 record = await self._generate(
                     prompt,
+                    ratio=ratio,
                     input_images=input_images,
                     user_id=user_id,
                     user_name=user_name,
@@ -1023,18 +1347,35 @@ class VolcJimengPlugin(Star):
                 )
             except JimengError as exc:
                 return f"生成失败：{exc}"
+            llm_text = ""
+            if self._needs_llm_reply():
+                llm_text = await self._llm_followup(
+                    event.unified_msg_origin, record, event.message_str or ""
+                )
             chain = MessageChain()
+            caption = self._caption_text(record)
+            if caption:
+                chain.message(caption)
             for file_info in record.get("files") or []:
                 path = self._images_dir / file_info["image"]
                 if path.exists():
                     chain.file_image(str(path))
+            if llm_text:
+                chain.message(llm_text)
             await event.send(chain)
             return "图片已生成并发送给用户。"
 
         umo = event.unified_msg_origin
         task = asyncio.create_task(
             self._background_generate(
-                umo, prompt, input_images, user_id, user_name, is_admin
+                umo,
+                prompt,
+                input_images,
+                user_id,
+                user_name,
+                is_admin,
+                ratio,
+                event.message_str or "",
             )
         )
         self._bg_tasks.add(task)
@@ -1072,6 +1413,9 @@ class VolcJimengPlugin(Star):
             "force_single": bool(self._cfg("force_single")),
             "enable_img2img": bool(self._cfg("enable_img2img")),
             "max_input_images": self._cfg_int("max_input_images", 4),
+            "feedback_mode": self._feedback_mode(),
+            "llm_followup_prompt": str(self._cfg("llm_followup_prompt") or ""),
+            "llm_followup_provider_id": str(self._cfg("llm_followup_provider_id") or ""),
             "r2_enabled": bool(self._cfg("r2_enabled")),
             "r2_account_id": str(self._cfg("r2_account_id") or ""),
             "r2_bucket": str(self._cfg("r2_bucket") or ""),
@@ -1131,6 +1475,10 @@ class VolcJimengPlugin(Star):
                 "config": self._config_public(),
                 "models": [{"value": key, "label": label} for key, label in REQ_KEYS.items()],
                 "sizes": [{"value": key, "label": label} for key, label in SIZE_PRESETS.items()],
+                "feedback_modes": [
+                    {"value": key, "label": label}
+                    for key, label in FEEDBACK_MODES.items()
+                ],
                 "size_hint": SIZE_HINT,
             }
         )
@@ -1178,11 +1526,21 @@ class VolcJimengPlugin(Star):
                 if sk and sk != "******":
                     patch["r2_secret_access_key"] = sk
 
+        for key in ("llm_followup_prompt", "llm_followup_provider_id"):
+            if key in payload:
+                patch[key] = str(payload.get(key) or "").strip()
+
         if "req_key" in payload:
             req_key = str(payload.get("req_key") or "").strip()
             if req_key not in REQ_KEYS:
                 return error_response("不支持的 req_key")
             patch["req_key"] = req_key
+
+        if "feedback_mode" in payload:
+            mode = str(payload.get("feedback_mode") or "").strip()
+            if mode not in FEEDBACK_MODES:
+                return error_response("不支持的反馈方式")
+            patch["feedback_mode"] = mode
 
         if "size_preset" in payload:
             size = str(payload.get("size_preset") or "").strip()
@@ -1308,7 +1666,7 @@ class VolcJimengPlugin(Star):
                 target.unlink(missing_ok=True)
                 return error_response("图片不能超过 15MB")
             await asyncio.to_thread(self._validate_image_file, target)
-            # 4.6 只认公网 URL：上传时确认至少有一条可用通路
+            # 图生图只认公网 URL：上传时确认至少有一条可用通路
             if bool(self._cfg("r2_enabled")):
                 try:
                     self._r2_uploader().validate()

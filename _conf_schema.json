@@ -15,10 +15,18 @@
   "req_key": {
     "description": "生图模型",
     "type": "string",
-    "options": ["jimeng_seedream46_cvtob"],
-    "labels": ["即梦AI-图片生成4.6"],
+    "options": [
+      "jimeng_seedream46_cvtob",
+      "jimeng_t2i_v40",
+      "jimeng_t2i_v31"
+    ],
+    "labels": [
+      "即梦AI-图片生成4.6",
+      "即梦AI-图片生成4.0",
+      "即梦AI-文生图3.1"
+    ],
     "default": "jimeng_seedream46_cvtob",
-    "hint": "目前仅内置「即梦AI-图片生成4.6」。显示的是中文名称，实际请求使用内部 req_key。"
+    "hint": "4.6 / 4.0 支持文生图和图生图；3.1 只支持文生图，带参考图会提示不支持。"
   },
   "size_preset": {
     "description": "默认画面尺寸",
@@ -31,7 +39,10 @@
       "2560x1440",
       "3024x1296",
       "4096x4096",
-      "5404x3040"
+      "5404x3040",
+      "1440x2560",
+      "1728x2304",
+      "2160x3840"
     ],
     "labels": [
       "1K · 1:1（1024×1024）",
@@ -41,7 +52,10 @@
       "2K · 16:9（2560×1440）",
       "2K · 21:9（3024×1296）",
       "4K · 1:1（4096×4096）",
-      "4K · 16:9（5404×3040）"
+      "4K · 16:9（5404×3040）",
+      "2K · 9:16（1440×2560）",
+      "2K · 3:4（1728×2304）",
+      "4K · 9:16（2160×3840）"
     ],
     "default": "2048x2048",
     "hint": "2K 1:1 是官方默认档；尺寸越大越慢、越贵。"
@@ -71,6 +85,40 @@
     "default": 4,
     "slider": {"min": 1, "max": 14, "step": 1},
     "hint": "v4.6 最多支持 14 张输入图，参考图越多处理越慢、效果也可能下降。"
+  },
+  "feedback_mode": {
+    "description": "生成完成后的反馈",
+    "type": "string",
+    "options": [
+      "image_only",
+      "image_size",
+      "image_caption",
+      "image_llm",
+      "image_size_llm",
+      "image_caption_llm"
+    ],
+    "labels": [
+      "仅图片",
+      "图片 + 尺寸",
+      "图片 + 尺寸和完整提示词",
+      "图片 + 大模型回复（默认）",
+      "图片 + 尺寸 + 大模型回复",
+      "图片 + 尺寸和完整提示词 + 大模型回复"
+    ],
+    "default": "image_llm",
+    "hint": "所有选项都会附上图片；带「大模型回复」的会额外调用一次支持图片输入的聊天模型，再把图片和回复放在同一条消息里。"
+  },
+  "llm_followup_prompt": {
+    "description": "大模型回图提示词",
+    "type": "text",
+    "default": "图片已经生成完成。请结合这张图和用户原本的需求，用自然、简短的话告诉用户结果，不要重复提示词。",
+    "hint": "支持占位符 {prompt}（生图提示词）、{user_message}（用户原消息）、{size}（实际尺寸）。"
+  },
+  "llm_followup_provider_id": {
+    "description": "回图模型 Provider ID",
+    "type": "string",
+    "default": "",
+    "hint": "留空使用当前会话的聊天模型。"
   },
   "r2_enabled": {
     "description": "使用 Cloudflare R2 托管参考图",
